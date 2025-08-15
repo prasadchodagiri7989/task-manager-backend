@@ -1,14 +1,24 @@
+// api/index.js
 import 'dotenv/config';
-import app from '../src/app.js';
 import { connectDB } from '../src/config/db.js';
+import app from '../src/app.js';
+import { createServer } from 'http';
+import { parse } from 'url';
 
-let dbPromise;
-function ensureDB() {
-  if (!dbPromise) dbPromise = connectDB(process.env.MONGO_URI);
-  return dbPromise;
-}
+let server;
+let dbInitialized = false;
 
 export default async function handler(req, res) {
-  await ensureDB();
-  return app(req, res);
+  if (!dbInitialized) {
+    await connectDB(process.env.MONGO_URI);
+    dbInitialized = true;
+  }
+
+  if (!server) {
+    server = createServer(app);
+  }
+
+  const parsedUrl = parse(req.url, true);
+  req.url = parsedUrl.path;
+  server.emit('request', req, res);
 }
