@@ -16,6 +16,12 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'tiny' : 'dev'));
 
 const allowPreviewVercel = true;
 
+console.log('CORS whitelist:', {
+  localhost: 'http://localhost:8081',
+  frontend: process.env.FRONTEND_ORIGIN, // e.g. https://task-mng-flow.vercel.app
+});
+console.log('Allow Vercel preview:', allowPreviewVercel);
+
 // Allow localhost + your prod frontend + (optionally) any *.vercel.app preview
 const whitelist = [
   'http://localhost:8081',
