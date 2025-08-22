@@ -6,7 +6,7 @@ export const normalizeRole = (r) => String(r || '').trim().toLowerCase();
 export const ASSIGN_PERMISSIONS = {
   admin:   ['manager', 'employee'],
   manager: ['employee'],
-  worker:  [],
+  employee: [],
 };
 
 // Always compare normalized values
@@ -25,5 +25,5 @@ export const prettyRole = (r) => {
 };
 
 
-export const STATUSES = ["Todo", "In Progress", "Blocked", "Done"];
+export const STATUSES = ["Todo", "In-Progress", "In-Review", "Completed"];
 export const PRIORITIES = ["Low", "Medium", "High"];

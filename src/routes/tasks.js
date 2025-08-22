@@ -4,14 +4,13 @@ import mongoose from "mongoose";
 
 import { Task } from "../models/Task.js";
 import { User } from "../models/User.js";
+import { Group } from "../models/Group.js";
 import { authenticate } from "../middleware/auth.js";
 import {
   ROLES,
   PRIORITIES,
   STATUSES,
-  canAssign,
   normalizeRole,
-  prettyRole,
 } from "../utils/roles.js";
 
 const router = express.Router();
@@ -21,10 +20,15 @@ const restrictQueryByRole = (user) => {
   const role = normalizeRole(user?.role);
   if (role === ROLES.ADMIN) return {};
   if (role === ROLES.MANAGER) {
-    return { $or: [{ createdBy: user._id }, { assignedTo: user._id }] };
+    return { 
+      $or: [
+        { createdBy: user._id }, 
+        { 'assignedTo.user': user._id }
+      ] 
+    };
   }
-  // worker
-  return { assignedTo: user._id };
+  // employee - can only see tasks assigned to them
+  return { 'assignedTo.user': user._id };
 };
 
 const shape = (t) => t.toClient();
@@ -41,13 +45,19 @@ router.post("/", authenticate, async (req, res) => {
         .json({ message: "Only admin/manager can create tasks" });
     }
 
-    const { title, description, priority, due, assigneeId, attachments } =
-      req.body || {};
+    const { title, description, priority, due, attachments, assignedUserId, assignedGroupId, status = "Todo" } = req.body || {};
 
-    if (!title || !description || !assigneeId) {
+    if (!title || !description) {
       return res
         .status(400)
-        .json({ message: "title, description, assigneeId are required" });
+        .json({ message: "title and description are required" });
+    }
+
+    // Validate that only one assignment type is provided
+    if (assignedUserId && assignedGroupId) {
+      return res
+        .status(400)
+        .json({ message: "Task can be assigned to either a user OR a group, not both" });
     }
 
     // Validate priority if provided
@@ -57,41 +67,64 @@ router.post("/", authenticate, async (req, res) => {
         .json({ message: `priority must be one of ${PRIORITIES.join(", ")}` });
     }
 
-    // Validate ObjectId shape
-    if (!mongoose.isValidObjectId(assigneeId)) {
+    // Validate status if provided
+    if (status && !STATUSES.includes(status)) {
       return res
         .status(400)
-        .json({ message: "assigneeId must be a valid user ObjectId" });
+        .json({ message: `status must be one of ${STATUSES.join(", ")}` });
     }
 
-    const assignee = await User.findById(assigneeId);
-    if (!assignee || !assignee.isActive) {
-      return res.status(400).json({ message: "Invalid assignee" });
+    // Validate assigned user if provided
+    let validatedUserId = null;
+    if (assignedUserId) {
+      if (!mongoose.isValidObjectId(assignedUserId)) {
+        return res.status(400).json({ message: `Invalid user ID: ${assignedUserId}` });
+      }
+      const user = await User.findById(assignedUserId);
+      if (!user || !user.isActive) {
+        return res.status(400).json({ message: `Invalid or inactive user: ${assignedUserId}` });
+      }
+      validatedUserId = assignedUserId;
     }
 
-    if (!canAssign(actorRole, assignee.role)) {
-      return res.status(403).json({
-        message: `${prettyRole(actorRole)} cannot assign to ${prettyRole(
-          assignee.role
-        )}`,
-      });
+    // Validate assigned group if provided
+    let validatedGroupId = null;
+    if (assignedGroupId) {
+      if (!mongoose.isValidObjectId(assignedGroupId)) {
+        return res.status(400).json({ message: `Invalid group ID: ${assignedGroupId}` });
+      }
+      const group = await Group.findById(assignedGroupId);
+      if (!group || !group.isActive) {
+        return res.status(400).json({ message: `Invalid or inactive group: ${assignedGroupId}` });
+      }
+      validatedGroupId = assignedGroupId;
     }
 
     const task = await Task.create({
       title,
-      descriptionHtml: description, // store HTML/markup
+      description,
       priority: priority || "Medium",
       due: due ? new Date(due) : undefined,
       attachments: Array.isArray(attachments) ? attachments.slice(0, 10) : [],
-      createdBy: req.user._id, // ObjectId ref
-      assignedTo: assignee._id, // ObjectId ref
-      history: [
-        {
-          by: req.user._id,
-          action: `CREATED and assigned to ${assignee.email}`,
-        },
-      ],
+      createdBy: req.user._id,
+      comments: [],
+      assignedTo: {
+        user: validatedUserId,
+        group: validatedGroupId
+      },
+      status: {
+        status: status,
+        updatedAt: new Date(),
+        updatedBy: req.user._id
+      }
     });
+
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
+      { path: 'status.updatedBy', select: 'name email' }
+    ]);
 
     return res.status(201).json(shape(task));
   } catch (e) {
@@ -102,21 +135,12 @@ router.post("/", authenticate, async (req, res) => {
 });
 
 /* -----------------------------------------------------------
- * List tasks (scoped by role) + basic pagination
+ * List tasks + basic pagination (scoped by role)
  * --------------------------------------------------------- */
 router.get("/", authenticate, async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, priority } = req.query;
+    const { page = 1, limit = 10, priority, status, createdBy } = req.query;
     const filter = restrictQueryByRole(req.user);
-
-    if (status) {
-      if (!STATUSES.includes(status)) {
-        return res
-          .status(400)
-          .json({ message: `status must be one of ${STATUSES.join(", ")}` });
-      }
-      filter.status = status;
-    }
 
     if (priority) {
       if (!PRIORITIES.includes(priority)) {
@@ -127,7 +151,25 @@ router.get("/", authenticate, async (req, res) => {
       filter.priority = priority;
     }
 
+    if (status) {
+      if (!STATUSES.includes(status)) {
+        return res
+          .status(400)
+          .json({ message: `status must be one of ${STATUSES.join(", ")}` });
+      }
+      filter['status.status'] = status;
+    }
+
+    if (createdBy && mongoose.isValidObjectId(createdBy)) {
+      filter.createdBy = createdBy;
+    }
+
     const tasks = await Task.find(filter)
+      .populate('createdBy', 'name email')
+      .populate('assignedTo.user', 'name email role')
+      .populate('assignedTo.group', 'title description')
+      .populate('status.updatedBy', 'name email')
+      .populate('comments.user', 'name email')
       .sort({ updatedAt: -1 })
       .skip((+page - 1) * +limit)
       .limit(+limit);
@@ -157,9 +199,21 @@ router.get("/:id", authenticate, async (req, res) => {
 
     let task = null;
     if (/^\d+$/.test(id)) {
-      task = await Task.findOne({ ...base, tid: +id });
+      task = await Task.findOne({ ...base, tid: +id })
+        .populate('createdBy', 'name email')
+        .populate('assignedTo.user', 'name email role')
+        .populate('assignedTo.group', 'title description')
+        .populate('status.updatedBy', 'name email')
+        .populate('statusHistory.updatedBy', 'name email')
+        .populate('comments.user', 'name email');
     } else if (mongoose.isValidObjectId(id)) {
-      task = await Task.findOne({ ...base, _id: id });
+      task = await Task.findOne({ ...base, _id: id })
+        .populate('createdBy', 'name email')
+        .populate('assignedTo.user', 'name email role')
+        .populate('assignedTo.group', 'title description')
+        .populate('status.updatedBy', 'name email')
+        .populate('statusHistory.updatedBy', 'name email')
+        .populate('comments.user', 'name email');
     }
 
     if (!task) return res.status(404).json({ message: "Task not found" });
@@ -172,7 +226,7 @@ router.get("/:id", authenticate, async (req, res) => {
 });
 
 /* -----------------------------------------------------------
- * Update task (fields allowed vary by role)
+ * Update task (Admin, Manager, or Creator)
  * --------------------------------------------------------- */
 router.patch("/:id", authenticate, async (req, res) => {
   try {
@@ -189,25 +243,23 @@ router.patch("/:id", authenticate, async (req, res) => {
     const actor = req.user;
     const actorRole = normalizeRole(actor.role);
     const isCreator = String(task.createdBy) === String(actor._id);
-    const isAssignee = String(task.assignedTo) === String(actor._id);
 
     let allowedFields = [];
     if (actorRole === ROLES.ADMIN) {
-      allowedFields = ["title", "descriptionHtml", "status", "priority", "due", "attachments"];
-    } else if (actorRole === ROLES.MANAGER) {
-      if (!isCreator && !isAssignee) {
-        return res.status(403).json({ message: "Not allowed to modify this task" });
-      }
-      allowedFields = ["title", "descriptionHtml", "status", "priority", "due", "attachments"];
+      allowedFields = ["title", "description", "priority", "due", "attachments"];
+    } else if (actorRole === ROLES.MANAGER || isCreator) {
+      allowedFields = ["title", "description", "priority", "due", "attachments"];
     } else {
-      if (!isAssignee) return res.status(403).json({ message: "Not your task" });
-      allowedFields = ["status"];
+      return res.status(403).json({ message: "Not allowed to modify this task" });
     }
 
     const payload = { ...req.body };
-    if ("description" in payload) payload.descriptionHtml = payload.description;
-    if ("due" in payload && payload.due) payload.due = new Date(payload.due);
-
+    
+    // Handle due date conversion
+    if ("due" in payload && payload.due) {
+      payload.due = new Date(payload.due);
+    }
+    
     const updates = {};
     for (const key of allowedFields) {
       if (key in payload) updates[key] = payload[key];
@@ -218,11 +270,12 @@ router.patch("/:id", authenticate, async (req, res) => {
     }
 
     Object.assign(task, updates);
-    task.history.push({
-      by: actor._id,
-      action: `UPDATED: ${Object.keys(updates).join(", ")}`,
-    });
     await task.save();
+
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'comments.user', select: 'name email' }
+    ]);
 
     return res.json(shape(task));
   } catch (e) {
@@ -233,20 +286,56 @@ router.patch("/:id", authenticate, async (req, res) => {
 });
 
 /* -----------------------------------------------------------
- * Reassign task (Admin/Manager) — expects assigneeId as ObjectId
+ * Add comment to task
  * --------------------------------------------------------- */
-router.patch("/:id/assign", authenticate, async (req, res) => {
+router.post("/:id/comments", authenticate, async (req, res) => {
   try {
-    const actorRole = normalizeRole(req.user.role);
-    if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
-      return res.status(403).json({ message: "Only admin/manager can reassign" });
+    const { id } = req.params;
+    const { comment } = req.body;
+
+    if (!comment || comment.trim().length === 0) {
+      return res.status(400).json({ message: "Comment is required" });
     }
 
+    const base = restrictQueryByRole(req.user);
+    let task =
+      /^\d+$/.test(id)
+        ? await Task.findOne({ ...base, tid: +id })
+        : mongoose.isValidObjectId(id)
+        ? await Task.findOne({ ...base, _id: id })
+        : null;
+
+    if (!task) return res.status(404).json({ message: "Task not found" });
+
+    await task.addComment(req.user._id, comment.trim());
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.users', select: 'name email role' },
+      { path: 'assignedTo.groups', select: 'title description' },
+      { path: 'status.updatedBy', select: 'name email' },
+      { path: 'comments.user', select: 'name email' }
+    ]);
+
+    return res.json(shape(task));
+  } catch (e) {
+    return res
+      .status(500)
+      .json({ message: "Add comment error", error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Update task status
+ * --------------------------------------------------------- */
+router.patch("/:id/status", authenticate, async (req, res) => {
+  try {
     const { id } = req.params;
-    const { assigneeId } = req.body || {};
-    if (!assigneeId) return res.status(400).json({ message: "assigneeId is required" });
-    if (!mongoose.isValidObjectId(assigneeId)) {
-      return res.status(400).json({ message: "assigneeId must be a valid user ObjectId" });
+    const { status, comment } = req.body;
+
+    if (!status || !STATUSES.includes(status)) {
+      return res.status(400).json({ 
+        message: `Status is required and must be one of: ${STATUSES.join(", ")}` 
+      });
     }
 
     let task =
@@ -255,33 +344,150 @@ router.patch("/:id/assign", authenticate, async (req, res) => {
         : mongoose.isValidObjectId(id)
         ? await Task.findById(id)
         : null;
+
     if (!task) return res.status(404).json({ message: "Task not found" });
 
-    const assignee = await User.findById(assigneeId);
-    if (!assignee || !assignee.isActive) {
-      return res.status(400).json({ message: "Invalid assignee" });
-    }
+    // Permission check - only assigned users, managers, admins, or creators can update status
+    const actorRole = normalizeRole(req.user.role);
+    const isCreator = String(task.createdBy) === String(req.user._id);
+    const isAssigned = task.isUserAssigned(req.user._id);
 
-    if (!canAssign(actorRole, assignee.role)) {
-      return res.status(403).json({
-        message: `${prettyRole(actorRole)} cannot assign to ${prettyRole(
-          assignee.role
-        )}`,
+    if (actorRole !== ROLES.ADMIN && actorRole !== ROLES.MANAGER && !isCreator && !isAssigned) {
+      return res.status(403).json({ 
+        message: "You can only update status for tasks assigned to you or that you created" 
       });
     }
 
-    task.assignedTo = assignee._id;
-    task.history.push({
-      by: req.user._id,
-      action: `REASSIGNED to ${assignee.email}`,
-    });
-    await task.save();
+    await task.updateStatus(status, req.user._id, comment);
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.users', select: 'name email role' },
+      { path: 'assignedTo.groups', select: 'title description' },
+      { path: 'status.updatedBy', select: 'name email' },
+      { path: 'statusHistory.updatedBy', select: 'name email' }
+    ]);
 
     return res.json(shape(task));
   } catch (e) {
     return res
       .status(500)
-      .json({ message: "Reassign error", error: e.message });
+      .json({ message: "Update task status error", error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Assign task to user or group
+ * --------------------------------------------------------- */
+router.patch("/:id/assign", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, groupId } = req.body;
+
+    const actorRole = normalizeRole(req.user.role);
+    if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
+      return res.status(403).json({ 
+        message: "Only admin/manager can assign tasks" 
+      });
+    }
+
+    // Validate that only one assignment type is provided
+    if (userId && groupId) {
+      return res.status(400).json({ 
+        message: "Task can be assigned to either a user OR a group, not both" 
+      });
+    }
+
+    if (!userId && !groupId) {
+      return res.status(400).json({ 
+        message: "Either userId or groupId must be provided" 
+      });
+    }
+
+    let task =
+      /^\d+$/.test(id)
+        ? await Task.findOne({ tid: +id })
+        : mongoose.isValidObjectId(id)
+        ? await Task.findById(id)
+        : null;
+
+    if (!task) return res.status(404).json({ message: "Task not found" });
+
+    // Validate and assign user
+    if (userId) {
+      if (!mongoose.isValidObjectId(userId)) {
+        return res.status(400).json({ message: `Invalid user ID: ${userId}` });
+      }
+      const user = await User.findById(userId);
+      if (!user || !user.isActive) {
+        return res.status(400).json({ message: `Invalid or inactive user: ${userId}` });
+      }
+      await task.assignUser(userId);
+    }
+
+    // Validate and assign group
+    if (groupId) {
+      if (!mongoose.isValidObjectId(groupId)) {
+        return res.status(400).json({ message: `Invalid group ID: ${groupId}` });
+      }
+      const group = await Group.findById(groupId);
+      if (!group || !group.isActive) {
+        return res.status(400).json({ message: `Invalid or inactive group: ${groupId}` });
+      }
+      await task.assignGroup(groupId);
+    }
+
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
+      { path: 'status.updatedBy', select: 'name email' }
+    ]);
+
+    return res.json(shape(task));
+  } catch (e) {
+    return res
+      .status(500)
+      .json({ message: "Assign task error", error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Remove assignment from task
+ * --------------------------------------------------------- */
+router.patch("/:id/unassign", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const actorRole = normalizeRole(req.user.role);
+    if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
+      return res.status(403).json({ 
+        message: "Only admin/manager can remove task assignments" 
+      });
+    }
+
+    let task =
+      /^\d+$/.test(id)
+        ? await Task.findOne({ tid: +id })
+        : mongoose.isValidObjectId(id)
+        ? await Task.findById(id)
+        : null;
+
+    if (!task) return res.status(404).json({ message: "Task not found" });
+
+    await task.removeAssignment();
+
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
+      { path: 'status.updatedBy', select: 'name email' }
+    ]);
+
+    return res.json(shape(task));
+  } catch (e) {
+    return res
+      .status(500)
+      .json({ message: "Remove assignment error", error: e.message });
   }
 });
 
@@ -303,6 +509,7 @@ router.delete("/:id", authenticate, async (req, res) => {
         : null;
 
     if (!deleted) return res.status(404).json({ message: "Task not found" });
+
     return res.json({ message: "Task deleted" });
   } catch (e) {
     return res

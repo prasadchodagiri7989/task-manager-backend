@@ -16,12 +16,12 @@ router.get("/", authenticate, async (req, res) => {
       if (!Object.values(ROLES).includes(r)) {
         return res.status(400).json({ message: "Invalid role filter" });
       }
-      if (req.user.role === ROLES.MANAGER && r !== ROLES.WORKER) {
+      if (req.user.role === ROLES.MANAGER && r !== ROLES.EMPLOYEE) {
         return res.status(403).json({ message: "Managers can only view workers" });
       }
       query.role = r;
-    } else if (req.user.role === ROLES.MANAGER) {
-      query.role = ROLES.WORKER;
+    } else if (req.user.role === ROLES.MANAGER) {   //check -1
+      query.role = ROLES.EMPLOYEE;
     }
 
     const users = await User.find(query).sort({ createdAt: -1 });

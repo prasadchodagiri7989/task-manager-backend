@@ -7,6 +7,8 @@ import morgan from 'morgan';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import taskRoutes from './routes/tasks.js';
+import groupRoutes from './routes/groups.js';
+import userTasksRoutes from './routes/userTasks.js';
 
 const app = express();
 
@@ -25,6 +27,7 @@ console.log('Allow Vercel preview:', allowPreviewVercel);
 // Allow localhost + your prod frontend + (optionally) any *.vercel.app preview
 const whitelist = [
   'http://localhost:8081',
+  'http://localhost:8080',
   process.env.FRONTEND_ORIGIN, // e.g. https://task-mng-flow.vercel.app
 ].filter(Boolean);
 
@@ -52,5 +55,7 @@ app.get('/', (req, res) => res.send('Task Manager API is running'));
 app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
 app.use('/tasks', taskRoutes);
+app.use('/groups', groupRoutes);
+app.use('/user-tasks', userTasksRoutes);
 
 export default app;

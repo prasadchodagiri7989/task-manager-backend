@@ -10,6 +10,7 @@ let dbInitialized = false;
 
 export default async function handler(req, res) {
   if (!dbInitialized) {
+    console.log('Connecting to MongoDB...'+ process.env.MONGO_URI);
     await connectDB(process.env.MONGO_URI);
     dbInitialized = true;
   }
