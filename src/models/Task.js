@@ -102,6 +102,10 @@ const taskSchema = new mongoose.Schema(
       index: true 
     },
 
+    // File and voice Cloudinary URLs
+    file: { type: String },
+    voice: { type: String },
+
     // Comments on this task
     comments: {
       type: [commentSchema],
@@ -252,6 +256,8 @@ taskSchema.methods.toClient = function () {
     priority: this.priority,
     due: this.due,                       // due date
     attachments: this.attachments,
+    file: this.file,
+    voice: this.voice,
     createdBy: String(this.createdBy),
     comments: this.comments,
     assignedTo: {

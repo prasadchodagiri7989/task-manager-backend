@@ -1,7 +1,10 @@
+import upload, { uploadToCloudinary } from '../utils/cloudinaryUpload.js';
 import nodemailer from 'nodemailer';
 // routes/tasks.js
 import express from "express";
 import mongoose from "mongoose";
+import { uploadAudio } from "../utils/uploadAudio.js";
+
 
 import { Task } from "../models/Task.js";
 import { User } from "../models/User.js";
@@ -52,9 +55,9 @@ const restrictQueryByRole = async (user) => {
 const shape = (t) => t.toClient();
 
 /* -----------------------------------------------------------
- * Create task (Admin, Manager)
+ * Create task (Admin, Manager) with file/voice upload
  * --------------------------------------------------------- */
-router.post("/", authenticate, async (req, res) => {
+router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' }]), async (req, res) => {
   try {
     const actorRole = normalizeRole(req.user.role);
     if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
@@ -64,6 +67,29 @@ router.post("/", authenticate, async (req, res) => {
     }
 
     const { title, description, priority, due, attachments, assignedUserId, assignedGroupId, status = "Todo" } = req.body || {};
+
+    // Handle file and voice uploads
+    let fileUrl = null;
+    let voiceUrl = null;
+    if (req.files && req.files.file && req.files.file[0]) {
+      try {
+        const fileRes = await uploadToCloudinary(req.files.file[0]);
+        fileUrl = fileRes && fileRes.secure_url ? fileRes.secure_url : null;
+      } catch (err) {
+        console.error('File upload error:', err);
+      }
+    }
+
+if (req.files && req.files.voice && req.files.voice[0]) {
+  try {
+    const voiceRes = await uploadAudio(req.files.voice[0].buffer);
+    console.log("Cloudinary Audio Response:", voiceRes);
+    voiceUrl = voiceRes.url;
+  } catch (err) {
+    console.error("Voice upload error:", err);
+  }
+}
+
 
     if (!title || !description) {
       return res
@@ -125,6 +151,8 @@ router.post("/", authenticate, async (req, res) => {
       priority: priority || "Medium",
       due: due ? new Date(due) : undefined,
       attachments: Array.isArray(attachments) ? attachments.slice(0, 10) : [],
+      file: fileUrl,
+      voice: voiceUrl,
       createdBy: req.user._id,
       comments: [],
       assignedTo: {
@@ -195,7 +223,7 @@ router.post("/", authenticate, async (req, res) => {
 router.get("/", authenticate, async (req, res) => {
   try {
     const { page = 1, limit = 10, priority, status, createdBy } = req.query;
-const filter = await restrictQueryByRole(req.user);
+    const filter = await restrictQueryByRole(req.user);
 
     if (priority) {
       if (!PRIORITIES.includes(priority)) {
@@ -250,7 +278,7 @@ const filter = await restrictQueryByRole(req.user);
 router.get("/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-const base = await restrictQueryByRole(req.user);
+    const base = await restrictQueryByRole(req.user);
 
     let task = null;
     if (/^\d+$/.test(id)) {
@@ -290,8 +318,8 @@ router.patch("/:id", authenticate, async (req, res) => {
       /^\d+$/.test(id)
         ? await Task.findOne({ tid: +id })
         : mongoose.isValidObjectId(id)
-        ? await Task.findById(id)
-        : null;
+          ? await Task.findById(id)
+          : null;
 
     if (!task) return res.status(404).json({ message: "Task not found" });
 
@@ -309,12 +337,12 @@ router.patch("/:id", authenticate, async (req, res) => {
     }
 
     const payload = { ...req.body };
-    
+
     // Handle due date conversion
     if ("due" in payload && payload.due) {
       payload.due = new Date(payload.due);
     }
-    
+
     const updates = {};
     for (const key of allowedFields) {
       if (key in payload) updates[key] = payload[key];
@@ -357,8 +385,8 @@ router.post("/:id/comments", authenticate, async (req, res) => {
       /^\d+$/.test(id)
         ? await Task.findOne({ ...base, tid: +id })
         : mongoose.isValidObjectId(id)
-        ? await Task.findOne({ ...base, _id: id })
-        : null;
+          ? await Task.findOne({ ...base, _id: id })
+          : null;
 
     if (!task) return res.status(404).json({ message: "Task not found" });
 
@@ -388,8 +416,8 @@ router.patch("/:id/status", authenticate, async (req, res) => {
     const { status, comment } = req.body;
 
     if (!status || !STATUSES.includes(status)) {
-      return res.status(400).json({ 
-        message: `Status is required and must be one of: ${STATUSES.join(", ")}` 
+      return res.status(400).json({
+        message: `Status is required and must be one of: ${STATUSES.join(", ")}`
       });
     }
 
@@ -397,8 +425,8 @@ router.patch("/:id/status", authenticate, async (req, res) => {
       /^\d+$/.test(id)
         ? await Task.findOne({ tid: +id })
         : mongoose.isValidObjectId(id)
-        ? await Task.findById(id)
-        : null;
+          ? await Task.findById(id)
+          : null;
 
     if (!task) return res.status(404).json({ message: "Task not found" });
 
@@ -408,8 +436,8 @@ router.patch("/:id/status", authenticate, async (req, res) => {
     const isAssigned = task.isUserAssigned(req.user._id);
 
     if (actorRole !== ROLES.ADMIN && actorRole !== ROLES.MANAGER && !isCreator && !isAssigned) {
-      return res.status(403).json({ 
-        message: "You can only update status for tasks assigned to you or that you created" 
+      return res.status(403).json({
+        message: "You can only update status for tasks assigned to you or that you created"
       });
     }
 
@@ -440,21 +468,21 @@ router.patch("/:id/assign", authenticate, async (req, res) => {
 
     const actorRole = normalizeRole(req.user.role);
     if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
-      return res.status(403).json({ 
-        message: "Only admin/manager can assign tasks" 
+      return res.status(403).json({
+        message: "Only admin/manager can assign tasks"
       });
     }
 
     // Validate that only one assignment type is provided
     if (userId && groupId) {
-      return res.status(400).json({ 
-        message: "Task can be assigned to either a user OR a group, not both" 
+      return res.status(400).json({
+        message: "Task can be assigned to either a user OR a group, not both"
       });
     }
 
     if (!userId && !groupId) {
-      return res.status(400).json({ 
-        message: "Either userId or groupId must be provided" 
+      return res.status(400).json({
+        message: "Either userId or groupId must be provided"
       });
     }
 
@@ -462,8 +490,8 @@ router.patch("/:id/assign", authenticate, async (req, res) => {
       /^\d+$/.test(id)
         ? await Task.findOne({ tid: +id })
         : mongoose.isValidObjectId(id)
-        ? await Task.findById(id)
-        : null;
+          ? await Task.findById(id)
+          : null;
 
     if (!task) return res.status(404).json({ message: "Task not found" });
 
@@ -515,8 +543,8 @@ router.patch("/:id/unassign", authenticate, async (req, res) => {
 
     const actorRole = normalizeRole(req.user.role);
     if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
-      return res.status(403).json({ 
-        message: "Only admin/manager can remove task assignments" 
+      return res.status(403).json({
+        message: "Only admin/manager can remove task assignments"
       });
     }
 
@@ -524,8 +552,8 @@ router.patch("/:id/unassign", authenticate, async (req, res) => {
       /^\d+$/.test(id)
         ? await Task.findOne({ tid: +id })
         : mongoose.isValidObjectId(id)
-        ? await Task.findById(id)
-        : null;
+          ? await Task.findById(id)
+          : null;
 
     if (!task) return res.status(404).json({ message: "Task not found" });
 
@@ -560,8 +588,8 @@ router.delete("/:id", authenticate, async (req, res) => {
       /^\d+$/.test(id)
         ? await Task.findOneAndDelete({ tid: +id })
         : mongoose.isValidObjectId(id)
-        ? await Task.findByIdAndDelete(id)
-        : null;
+          ? await Task.findByIdAndDelete(id)
+          : null;
 
     if (!deleted) return res.status(404).json({ message: "Task not found" });
 
