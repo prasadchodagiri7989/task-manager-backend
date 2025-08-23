@@ -28,6 +28,7 @@ console.log('Allow Vercel preview:', allowPreviewVercel);
 const whitelist = [
   'http://localhost:8081',
   'http://localhost:8080',
+  'https://task-mng-flow.vercel.app',
   process.env.FRONTEND_ORIGIN, // e.g. https://task-mng-flow.vercel.app
 ].filter(Boolean);
 
