@@ -1,3 +1,5 @@
+// ...existing code...
+
 // routes/groups.js
 import express from "express";
 import mongoose from "mongoose";
@@ -90,19 +92,18 @@ router.post("/", authenticate, async (req, res) => {
       }
     }
 
-    // Ensure lead is in members array
-    if (!validMembers.some(id => String(id) === String(leadId))) {
-      validMembers.push(leadId);
-    }
+// Always include lead + remove duplicates
+const uniqueMembers = [...new Set([...validMembers.map(id => String(id)), String(leadId)])];
 
-    const group = await Group.create({
-      title,
-      description,
-      lead: leadId,
-      members: validMembers,
-      createdBy: actor._id,
-      createdDatetime: new Date()
-    });
+const group = await Group.create({
+  title,
+  description,
+  lead: leadId,
+  members: uniqueMembers,
+  createdBy: actor._id,
+  createdDatetime: new Date()
+});
+
 
     // Populate for response
     await group.populate(['lead', 'members', 'createdBy']);
@@ -241,12 +242,10 @@ router.patch("/:id", authenticate, async (req, res) => {
       }
       
       // Ensure lead is in members
-      const currentLead = updates.lead || group.lead;
-      if (!validMembers.some(id => String(id) === String(currentLead))) {
-        validMembers.push(currentLead);
-      }
-      
-      updates.members = validMembers;
+// Always include lead + remove duplicates
+const currentLead = updates.lead || group.lead;
+updates.members = [...new Set([...validMembers.map(id => String(id)), String(currentLead)])];
+
     }
 
     if (Object.keys(updates).length === 0) {
@@ -262,6 +261,22 @@ router.patch("/:id", authenticate, async (req, res) => {
     return res
       .status(500)
       .json({ message: "Update group error", error: e.message });
+  }
+});
+
+router.get("/employee/my-groups", authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const groups = await Group.find({ members: userId })
+      .populate(['lead', 'members', 'createdBy', 'tasks'])
+      .sort({ updatedAt: -1 });
+
+    return res.json(groups.map(shape));
+  } catch (e) {
+    return res.status(500).json({
+      message: "Get my groups error",
+      error: e.message
+    });
   }
 });
 

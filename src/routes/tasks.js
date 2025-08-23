@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer';
 // routes/tasks.js
 import express from "express";
 import mongoose from "mongoose";
@@ -16,20 +17,37 @@ import {
 const router = express.Router();
 
 /** Scope queries based on the authenticated user's role */
-const restrictQueryByRole = (user) => {
+const restrictQueryByRole = async (user) => {
   const role = normalizeRole(user?.role);
+
   if (role === ROLES.ADMIN) return {};
+
   if (role === ROLES.MANAGER) {
-    return { 
+    // Get all groups where manager is lead or member
+    const groupIds = await Group.find({
+      $or: [{ lead: user._id }, { members: user._id }]
+    }).distinct("_id");
+
+    return {
       $or: [
-        { createdBy: user._id }, 
-        { 'assignedTo.user': user._id }
-      ] 
+        { createdBy: user._id },
+        { "assignedTo.user": user._id },
+        { "assignedTo.group": { $in: groupIds } }
+      ],
     };
   }
-  // employee - can only see tasks assigned to them
-  return { 'assignedTo.user': user._id };
+
+  // Employee: tasks assigned directly or via group membership
+  const groupIds = await Group.find({ members: user._id }).distinct("_id");
+
+  return {
+    $or: [
+      { "assignedTo.user": user._id },
+      { "assignedTo.group": { $in: groupIds } },
+    ],
+  };
 };
+
 
 const shape = (t) => t.toClient();
 
@@ -100,6 +118,7 @@ router.post("/", authenticate, async (req, res) => {
       validatedGroupId = assignedGroupId;
     }
 
+    // Create task
     const task = await Task.create({
       title,
       description,
@@ -126,6 +145,42 @@ router.post("/", authenticate, async (req, res) => {
       { path: 'status.updatedBy', select: 'name email' }
     ]);
 
+    // Send email notification AFTER task is created
+    if (validatedUserId) {
+      try {
+        const assignedUser = await User.findById(validatedUserId);
+        if (assignedUser && assignedUser.email) {
+          const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+              user: process.env.EMAIL_USER,
+              pass: process.env.EMAIL_PASS
+            }
+          });
+
+          const taskLink = `http://localhost:8081/tasks/${task._id}`;
+          const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: assignedUser.email,
+            subject: "You have been assigned a new task",
+            html: `<p>Hello ${assignedUser.name},</p>
+              <p>You have been assigned to a new task:</p>
+              <ul>
+                <li><strong>Title:</strong> ${task.title}</li>
+                <li><strong>Description:</strong> ${task.description}</li>
+                <li><strong>Priority:</strong> ${task.priority}</li>
+                <li><strong>Due Date:</strong> ${task.due ? new Date(task.due).toLocaleString() : "N/A"}</li>
+              </ul>
+              <p>View task: <a href="${taskLink}">${taskLink}</a></p>`
+          };
+
+          await transporter.sendMail(mailOptions);
+        }
+      } catch (mailErr) {
+        console.error("Error sending assignment email:", mailErr);
+      }
+    }
+
     return res.status(201).json(shape(task));
   } catch (e) {
     return res
@@ -140,7 +195,7 @@ router.post("/", authenticate, async (req, res) => {
 router.get("/", authenticate, async (req, res) => {
   try {
     const { page = 1, limit = 10, priority, status, createdBy } = req.query;
-    const filter = restrictQueryByRole(req.user);
+const filter = await restrictQueryByRole(req.user);
 
     if (priority) {
       if (!PRIORITIES.includes(priority)) {
@@ -195,7 +250,7 @@ router.get("/", authenticate, async (req, res) => {
 router.get("/:id", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const base = restrictQueryByRole(req.user);
+const base = await restrictQueryByRole(req.user);
 
     let task = null;
     if (/^\d+$/.test(id)) {
@@ -310,8 +365,8 @@ router.post("/:id/comments", authenticate, async (req, res) => {
     await task.addComment(req.user._id, comment.trim());
     await task.populate([
       { path: 'createdBy', select: 'name email' },
-      { path: 'assignedTo.users', select: 'name email role' },
-      { path: 'assignedTo.groups', select: 'title description' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
       { path: 'status.updatedBy', select: 'name email' },
       { path: 'comments.user', select: 'name email' }
     ]);
@@ -361,8 +416,8 @@ router.patch("/:id/status", authenticate, async (req, res) => {
     await task.updateStatus(status, req.user._id, comment);
     await task.populate([
       { path: 'createdBy', select: 'name email' },
-      { path: 'assignedTo.users', select: 'name email role' },
-      { path: 'assignedTo.groups', select: 'title description' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
       { path: 'status.updatedBy', select: 'name email' },
       { path: 'statusHistory.updatedBy', select: 'name email' }
     ]);

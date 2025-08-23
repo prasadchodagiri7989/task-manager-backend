@@ -5,6 +5,21 @@ import { permit } from "../middleware/permit.js";
 import { ROLES } from "../utils/roles.js";
 
 const router = express.Router();
+// PATCH /:id - edit user details (admin only)
+router.patch('/:id', authenticate, permit(ROLES.ADMIN), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const allowedFields = ['name', 'email', 'role', 'isActive'];
+    for (const key of allowedFields) {
+      if (key in req.body) user[key] = req.body[key];
+    }
+    await user.save();
+    return res.json(user.toClient ? user.toClient() : user);
+  } catch (e) {
+    return res.status(500).json({ message: 'Edit user error', error: e.message });
+  }
+});
 
 router.get("/", authenticate, async (req, res) => {
   try {
@@ -32,16 +47,33 @@ router.get("/", authenticate, async (req, res) => {
 });
 
 // Admin: toggle active by numeric uid (keep as-is if you use uid)
+// Toggle active by MongoDB ObjectId
 router.patch("/:id/toggle", authenticate, permit(ROLES.ADMIN), async (req, res) => {
   try {
-    const user = await User.findOne({ uid: +req.params.id });
+    const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
     user.isActive = !user.isActive;
     await user.save();
-    return res.json({ id: user.uid, isActive: user.isActive });
+    return res.json({ id: user._id, isActive: user.isActive });
   } catch (e) {
     return res.status(500).json({ message: "Toggle user error", error: e.message });
   }
 });
 
+// PATCH /:id/password - update user password
+router.patch('/:id/password', authenticate, async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password || password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    }
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    user.password = password; // If you hash passwords, use user.setPassword(password) or similar
+    await user.save();
+    return res.json({ message: 'Password updated' });
+  } catch (e) {
+    return res.status(500).json({ message: 'Update password error', error: e.message });
+  }
+});
 export default router;
