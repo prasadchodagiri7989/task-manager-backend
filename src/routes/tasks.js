@@ -1,9 +1,9 @@
-import upload, { uploadToCloudinary } from '../utils/cloudinaryUpload.js';
+import upload from '../utils/localUpload.js';
 import nodemailer from 'nodemailer';
 // routes/tasks.js
 import express from "express";
 import mongoose from "mongoose";
-import { uploadAudio } from "../utils/uploadAudio.js";
+
 
 
 import { Task } from "../models/Task.js";
@@ -54,6 +54,44 @@ const restrictQueryByRole = async (user) => {
 
 const shape = (t) => t.toClient();
 
+
+// -----------------------------------------------------------
+// Admin Dashboard Stats
+// -----------------------------------------------------------
+router.get('/admin-dashboard', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view dashboard' });
+    }
+
+    const [
+      totalTasks,
+      completedTasks,
+      incompleteTasks,
+      totalGroups,
+      totalUsers
+    ] = await Promise.all([
+      Task.countDocuments(),
+      Task.countDocuments({ 'status.status': 'Completed' }),
+      Task.countDocuments({ 'status.status': { $ne: 'Completed' } }),
+      Group.countDocuments(),
+      User.countDocuments()
+    ]);
+
+    return res.json({
+      totalTasks,
+      completedTasks,
+      incompleteTasks,
+      totalGroups,
+      totalUsers
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Dashboard error', error: e.message });
+  }
+});
+
+
 /* -----------------------------------------------------------
  * Create task (Admin, Manager) with file/voice upload
  * --------------------------------------------------------- */
@@ -68,27 +106,17 @@ router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' 
 
     const { title, description, priority, due, attachments, assignedUserId, assignedGroupId, status = "Todo" } = req.body || {};
 
-    // Handle file and voice uploads
+    // Handle file and voice uploads (local)
     let fileUrl = null;
     let voiceUrl = null;
     if (req.files && req.files.file && req.files.file[0]) {
-      try {
-        const fileRes = await uploadToCloudinary(req.files.file[0]);
-        fileUrl = fileRes && fileRes.secure_url ? fileRes.secure_url : null;
-      } catch (err) {
-        console.error('File upload error:', err);
-      }
+      const fileName = req.files.file[0].filename;
+      fileUrl = `http://localhost:4000/uploads/${fileName}`;
     }
-
-if (req.files && req.files.voice && req.files.voice[0]) {
-  try {
-    const voiceRes = await uploadAudio(req.files.voice[0].buffer);
-    console.log("Cloudinary Audio Response:", voiceRes);
-    voiceUrl = voiceRes.url;
-  } catch (err) {
-    console.error("Voice upload error:", err);
-  }
-}
+    if (req.files && req.files.voice && req.files.voice[0]) {
+      const voiceName = req.files.voice[0].filename;
+      voiceUrl = `http://localhost:4000/uploads/${voiceName}`;
+    }
 
 
     if (!title || !description) {

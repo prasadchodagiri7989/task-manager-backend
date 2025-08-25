@@ -1,34 +1,37 @@
 import { v2 as cloudinary } from "cloudinary";
+import streamifier from "streamifier";
 
-// configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-export const uploadAudio = async (fileBuffer) => {
+export const uploadAudio = async (file) => {
+  if (!file) throw new Error("No file provided");
+
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
-        resource_type: "video", // audio must use 'video'
         folder: "audio_uploads",
+        resource_type: "video", // must be 'video' for audio
+        timeout: 120000, // 2 min timeout
       },
-    //   {timeout:60000},
       (error, result) => {
         if (error) {
-          console.error("Cloudinary Audio Upload Error:", error);
-          return reject({ success: false, error: error.message });
+          console.error("Cloudinary Upload Error:", error);
+          reject(error);
+        } else {
+          resolve({
+            success: true,
+            url: result.secure_url,
+            public_id: result.public_id,
+          });
         }
-        resolve({
-          success: true,
-          url: result.secure_url,
-          public_id: result.public_id,
-        });
       }
     );
 
-    // push the buffer into the stream
-    uploadStream.end(fileBuffer);
+    // use streamifier to push buffer
+    streamifier.createReadStream(file.buffer).pipe(uploadStream);
   });
 };
