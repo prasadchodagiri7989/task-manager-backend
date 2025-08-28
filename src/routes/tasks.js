@@ -1,3 +1,8 @@
+// -----------------------------------------------------------
+// Get all notifications for the authenticated user
+// -----------------------------------------------------------
+import { Notification } from '../models/Notification.js';
+
 import upload from '../utils/localUpload.js';
 import nodemailer from 'nodemailer';
 // routes/tasks.js
@@ -22,9 +27,9 @@ const router = express.Router();
 /** Scope queries based on the authenticated user's role */
 const restrictQueryByRole = async (user) => {
   const role = normalizeRole(user?.role);
-
+  
   if (role === ROLES.ADMIN) return {};
-
+  
   if (role === ROLES.MANAGER) {
     // Get all groups where manager is lead or member
     const groupIds = await Group.find({
@@ -39,10 +44,10 @@ const restrictQueryByRole = async (user) => {
       ],
     };
   }
-
+  
   // Employee: tasks assigned directly or via group membership
   const groupIds = await Group.find({ members: user._id }).distinct("_id");
-
+  
   return {
     $or: [
       { "assignedTo.user": user._id },
@@ -55,6 +60,14 @@ const restrictQueryByRole = async (user) => {
 const shape = (t) => t.toClient();
 
 
+router.get('/notifications', authenticate, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ user: req.user._id }).sort({ createdAt: -1 });
+    return res.json({ data: notifications });
+  } catch (e) {
+    return res.status(500).json({ message: 'Get notifications error', error: e.message });
+  }
+});
 // -----------------------------------------------------------
 // Admin Dashboard Stats
 // -----------------------------------------------------------
@@ -96,6 +109,49 @@ router.get('/admin-dashboard', authenticate, async (req, res) => {
  * Create task (Admin, Manager) with file/voice upload
  * --------------------------------------------------------- */
 router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' }]), async (req, res) => {
+    // ...existing code...
+    // Create notification for assigned user
+    if (validatedUserId) {
+      await Notification.create({
+        user: validatedUserId,
+        type: 'task-assigned',
+        message: `You have been assigned a new task: ${title}`,
+        link: `/tasks/${task._id}`
+      });
+    }
+    // ...existing code...
+    // Create notification for completion
+    if (status === 'Completed') {
+      // Notify assigned user
+      if (task.assignedTo.user) {
+        await Notification.create({
+          user: task.assignedTo.user,
+          type: 'task-completed',
+          message: `Task completed: ${task.title}`,
+          link: `/tasks/${task._id}`
+        });
+      }
+      // Notify admin(s)
+      const admins = await User.find({ role: ROLES.ADMIN });
+      for (const admin of admins) {
+        await Notification.create({
+          user: admin._id,
+          type: 'task-completed',
+          message: `Task marked as completed: ${task.title}`,
+          link: `/tasks/${task._id}`
+        });
+      }
+    }
+    // ...existing code...
+    // Create notification for modification
+    if (task.assignedTo.user) {
+      await Notification.create({
+        user: task.assignedTo.user,
+        type: 'task-modified',
+        message: `Task modified: ${task.title}`,
+        link: `/tasks/${task._id}`
+      });
+    }
   try {
     const actorRole = normalizeRole(req.user.role);
     if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
@@ -385,8 +441,33 @@ router.patch("/:id", authenticate, async (req, res) => {
 
     await task.populate([
       { path: 'createdBy', select: 'name email' },
-      { path: 'comments.user', select: 'name email' }
+      { path: 'comments.user', select: 'name email' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' }
     ]);
+
+    // Notification logic: notify assigned user and assigner (admin/manager)
+    // Notify assigned user if present
+    if (task.assignedTo && task.assignedTo.user) {
+      await Notification.create({
+        user: task.assignedTo.user,
+        type: 'task-modified',
+        message: `Task updated: ${task.title}`,
+        link: `/tasks/${task._id}`
+      });
+    }
+    // Notify assigner (admin/manager who created the task)
+    if (task.createdBy) {
+      const assigner = await User.findById(task.createdBy);
+      if (assigner && (assigner.role === ROLES.ADMIN || assigner.role === ROLES.MANAGER)) {
+        await Notification.create({
+          user: assigner._id,
+          type: 'task-modified',
+          message: `Task you assigned has been updated: ${task.title}`,
+          link: `/tasks/${task._id}`
+        });
+      }
+    }
 
     return res.json(shape(task));
   } catch (e) {
@@ -477,6 +558,20 @@ router.patch("/:id/status", authenticate, async (req, res) => {
       { path: 'status.updatedBy', select: 'name email' },
       { path: 'statusHistory.updatedBy', select: 'name email' }
     ]);
+
+    // Notify admin or manager who assigned the task
+    if (task.createdBy) {
+      const assigner = await User.findById(task.createdBy);
+      console.log(assigner);
+      if (assigner && (assigner.role ==="ADMIN" || assigner.role === ROLES.MANAGER)) {
+        await Notification.create({
+          user: assigner._id,
+          type: 'task-status-updated',
+          message: `Status updated for task: ${task.title} (${status})`,
+          link: `/tasks/${task._id}`
+        });
+      }
+    }
 
     return res.json(shape(task));
   } catch (e) {
