@@ -70,6 +70,56 @@ router.get('/notifications', authenticate, async (req, res) => {
 });
 // -----------------------------------------------------------
 // Admin Dashboard Stats
+// Support both /admin-dashboard/reassignment-stats and /admin/dashboard/reassignment-stats
+router.get('/admin/dashboard/reassignment-stats', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view reassignment stats' });
+    }
+
+    // Count tasks that have a non-empty statusHistory with a status of "Reassigned"
+    const reassignedTasks = await Task.countDocuments({
+      statusHistory: { $elemMatch: { status: "Reassigned" } }
+    });
+
+    // Optionally, return more detailed stats
+    const totalTasks = await Task.countDocuments();
+
+    return res.json({
+      totalTasks,
+      reassignedTasks
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Reassignment stats error', error: e.message });
+  }
+});
+/* -----------------------------------------------------------
+ * Admin: Get reassignment stats (how many tasks have been reassigned)
+ * --------------------------------------------------------- */
+router.get('/admin-dashboard/reassignment-stats', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view reassignment stats' });
+    }
+
+    // Count tasks that have a non-empty statusHistory with a status of "Reassigned"
+    const reassignedTasks = await Task.countDocuments({
+      statusHistory: { $elemMatch: { status: "Reassigned" } }
+    });
+
+    // Optionally, return more detailed stats
+    const totalTasks = await Task.countDocuments();
+
+    return res.json({
+      totalTasks,
+      reassignedTasks
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Reassignment stats error', error: e.message });
+  }
+});
 // -----------------------------------------------------------
 router.get('/admin-dashboard', authenticate, async (req, res) => {
   try {
@@ -109,49 +159,6 @@ router.get('/admin-dashboard', authenticate, async (req, res) => {
  * Create task (Admin, Manager) with file/voice upload
  * --------------------------------------------------------- */
 router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' }]), async (req, res) => {
-    // ...existing code...
-    // Create notification for assigned user
-    if (validatedUserId) {
-      await Notification.create({
-        user: validatedUserId,
-        type: 'task-assigned',
-        message: `You have been assigned a new task: ${title}`,
-        link: `/tasks/${task._id}`
-      });
-    }
-    // ...existing code...
-    // Create notification for completion
-    if (status === 'Completed') {
-      // Notify assigned user
-      if (task.assignedTo.user) {
-        await Notification.create({
-          user: task.assignedTo.user,
-          type: 'task-completed',
-          message: `Task completed: ${task.title}`,
-          link: `/tasks/${task._id}`
-        });
-      }
-      // Notify admin(s)
-      const admins = await User.find({ role: ROLES.ADMIN });
-      for (const admin of admins) {
-        await Notification.create({
-          user: admin._id,
-          type: 'task-completed',
-          message: `Task marked as completed: ${task.title}`,
-          link: `/tasks/${task._id}`
-        });
-      }
-    }
-    // ...existing code...
-    // Create notification for modification
-    if (task.assignedTo.user) {
-      await Notification.create({
-        user: task.assignedTo.user,
-        type: 'task-modified',
-        message: `Task modified: ${task.title}`,
-        link: `/tasks/${task._id}`
-      });
-    }
   try {
     const actorRole = normalizeRole(req.user.role);
     if (![ROLES.ADMIN, ROLES.MANAGER].includes(actorRole)) {
@@ -173,7 +180,6 @@ router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' 
       const voiceName = req.files.voice[0].filename;
       voiceUrl = `http://localhost:4000/uploads/${voiceName}`;
     }
-
 
     if (!title || !description) {
       return res
@@ -257,8 +263,14 @@ router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' 
       { path: 'status.updatedBy', select: 'name email' }
     ]);
 
-    // Send email notification AFTER task is created
+    // Notify assigned user on creation
     if (validatedUserId) {
+      await Notification.create({
+        user: validatedUserId,
+        type: 'task-assigned',
+        message: `You have been assigned a new task: ${title}`,
+        link: `/tasks/${task._id}`
+      });
       try {
         const assignedUser = await User.findById(validatedUserId);
         if (assignedUser && assignedUser.email) {
@@ -291,6 +303,16 @@ router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' 
       } catch (mailErr) {
         console.error("Error sending assignment email:", mailErr);
       }
+    }
+
+    // Notify creator if task is completed on creation
+    if (status === 'Completed' && req.user._id) {
+      await Notification.create({
+        user: req.user._id,
+        type: 'task-completed',
+        message: `Your task has been marked as completed: ${title}`,
+        link: `/tasks/${task._id}`
+      });
     }
 
     return res.status(201).json(shape(task));
