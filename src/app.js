@@ -22,7 +22,8 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'tiny' : 'dev'));
 const whitelist = [
   'http://localhost:8081',
   'http://localhost:8080',
-  'https://task-mng-flow.vercel.app',
+  'https://task-mng-flow.vercel.app',,
+  'https://task-manager-united.vercel.app',
   process.env.FRONTEND_ORIGIN,
 ].filter(Boolean);
 
