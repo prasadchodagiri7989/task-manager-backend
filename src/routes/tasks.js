@@ -328,7 +328,7 @@ router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' 
  * --------------------------------------------------------- */
 router.get("/", authenticate, async (req, res) => {
   try {
-    const { page = 1, limit = 10, priority, status, createdBy } = req.query;
+    const { page = 1, limit = 100, priority, status, createdBy } = req.query;
     const filter = await restrictQueryByRole(req.user);
 
     if (priority) {
