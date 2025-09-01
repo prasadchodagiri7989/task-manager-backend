@@ -44,12 +44,25 @@ router.post("/", authenticate, async (req, res) => {
         .json({ message: "Only admin/manager can create groups" });
     }
 
-    const { title, description, leadId, memberIds = [] } = req.body || {};
+    const { name, description, leadId, memberIds } = req.body || {};
 
-    if (!title || !description || !leadId) {
+    console.log('Create Group Payload:', req.body);
+
+    const title = name;
+
+    // Validate required fields
+    if (!name || !description || !leadId) {
       return res
         .status(400)
         .json({ message: "title, description, and leadId are required" });
+    }
+
+    // Ensure memberIds is always an array
+    let memberIdList = [];
+    if (Array.isArray(memberIds)) {
+      memberIdList = memberIds;
+    } else if (typeof memberIds === 'string' && memberIds.length > 0) {
+      memberIdList = [memberIds];
     }
 
     // Validate leadId
