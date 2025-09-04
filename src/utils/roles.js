@@ -25,5 +25,5 @@ export const prettyRole = (r) => {
 };
 
 
-export const STATUSES = ["Todo", "In-Progress", "In-Review", "Completed"];
+export const STATUSES = ["Todo", "InProgress", "Completed", "Closed"];
 export const PRIORITIES = ["Low", "Medium", "High"];
