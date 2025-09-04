@@ -41,7 +41,7 @@ const statusSchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: STATUSES, // ["Todo", "In-Progress", "In-Review", "Completed"]
+      enum: STATUSES, // ["Todo", "InProgress", "Completed", "Closed"]
       default: "Todo",
       required: true
     },
@@ -64,16 +64,16 @@ const taskSchema = new mongoose.Schema(
     // optional sequential numeric id (keep if you like it)
     tid: { type: Number, unique: true, index: true },
 
-    title: { 
-      type: String, 
-      required: true, 
+    title: {
+      type: String,
+      required: true,
       trim: true,
       maxlength: 200
     },
 
-    description: { 
-      type: String, 
-      required: true, 
+    description: {
+      type: String,
+      required: true,
       trim: true,
       maxlength: 2000
     },
@@ -85,21 +85,21 @@ const taskSchema = new mongoose.Schema(
       required: true
     },
 
-    due: { 
-      type: Date 
+    due: {
+      type: Date
     },
 
-    attachments: { 
-      type: [attachmentSchema], 
-      default: [] 
+    attachments: {
+      type: [attachmentSchema],
+      default: []
     },
 
     // Who created this task
-    createdBy: { 
-      type: mongoose.Schema.Types.ObjectId, 
-      ref: "User", 
-      required: true, 
-      index: true 
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true
     },
 
     // File and voice Cloudinary URLs
@@ -113,6 +113,9 @@ const taskSchema = new mongoose.Schema(
     },
 
     // Assignment - either a single user OR a single group
+    // New fields for points logic
+    isReassigned: { type: Boolean, default: false },
+    isReopened: { type: Boolean, default: false },
     assignedTo: {
       user: {
         type: mongoose.Schema.Types.ObjectId,
@@ -121,14 +124,14 @@ const taskSchema = new mongoose.Schema(
       group: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Group"
-      }
+      },
     },
 
     // Current status
     status: {
       type: statusSchema,
       required: true,
-      default: function() {
+      default: function () {
         return {
           status: "Todo",
           updatedAt: new Date(),
@@ -164,17 +167,17 @@ taskSchema.pre("save", async function (next) {
   if (this.isNew && (this.tid === undefined || this.tid === null)) {
     this.tid = await getNextSeq("task");
   }
-  
+
   // Set initial status if not provided
   if (this.isNew && !this.status.updatedBy) {
     this.status.updatedBy = this.createdBy;
   }
-  
+
   next();
 });
 
 // Method to add comment to task
-taskSchema.methods.addComment = function(userId, commentText) {
+taskSchema.methods.addComment = function (userId, commentText) {
   this.comments.push({
     user: userId,
     comment: commentText
@@ -183,14 +186,14 @@ taskSchema.methods.addComment = function(userId, commentText) {
 };
 
 // Method to get latest comments (limit)
-taskSchema.methods.getRecentComments = function(limit = 10) {
+taskSchema.methods.getRecentComments = function (limit = 10) {
   return this.comments
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, limit);
 };
 
 // Method to update status
-taskSchema.methods.updateStatus = function(newStatus, updatedBy, comment) {
+taskSchema.methods.updateStatus = function (newStatus, updatedBy, comment) {
   // Add current status to history
   if (this.status.status !== newStatus) {
     this.statusHistory.push({
@@ -212,37 +215,71 @@ taskSchema.methods.updateStatus = function(newStatus, updatedBy, comment) {
 };
 
 // Method to assign user to task (replaces any existing assignment)
-taskSchema.methods.assignUser = function(userId) {
+taskSchema.methods.assignUser = function (userId) {
   this.assignedTo = { user: userId, group: null };
   return this.save();
 };
 
 // Method to assign group to task (replaces any existing assignment)
-taskSchema.methods.assignGroup = function(groupId) {
+taskSchema.methods.assignGroup = function (groupId) {
   this.assignedTo = { user: null, group: groupId };
   return this.save();
 };
 
 // Method to remove assignment
-taskSchema.methods.removeAssignment = function() {
+taskSchema.methods.removeAssignment = function () {
   this.assignedTo = { user: null, group: null };
   return this.save();
 };
 
 // Method to check if user is assigned to task
-taskSchema.methods.isUserAssigned = function(userId) {
+taskSchema.methods.isUserAssigned = function (userId) {
   return this.assignedTo.user && String(this.assignedTo.user) === String(userId);
 };
 
 // Method to check if user can access task
-taskSchema.methods.canUserAccess = function(user, userRole) {
+
+// Points calculation logic
+taskSchema.methods.calculatePoints = function ({ completedAt, due, isLate, isReassigned, isReopened }) {
+  let basePoints = 3;
+  let allocatedPoints = 0;
+  // On time
+  if (!isLate && completedAt && due && completedAt <= due) {
+    allocatedPoints = basePoints;
+  }
+  // Before time
+  if (completedAt && due && completedAt < due) {
+    allocatedPoints = basePoints + 2;
+  }
+  // Late/Overdue
+  if (isLate && completedAt && due && completedAt > due) {
+    const daysLate = Math.ceil((completedAt - due) / (1000 * 60 * 60 * 24));
+    allocatedPoints = basePoints - daysLate;
+  }
+  // Reassign
+  if (isReassigned) {
+    allocatedPoints = basePoints - 3;
+  }
+  // Incorrect completion/reopen
+  if (isReopened) {
+    allocatedPoints = basePoints - 5;
+  }
+  // Minimum points is 0
+  return Math.max(allocatedPoints, 0);
+};
+
+// Percentage calculation
+taskSchema.methods.calculatePercentage = function (totalAllocatedPoints, totalPoints) {
+  if (!totalPoints || totalPoints === 0) return 0;
+  return (totalAllocatedPoints / totalPoints) * 100;
+};
+
+taskSchema.methods.canUserAccess = function (user, userRole) {
   const isCreator = String(this.createdBy) === String(user._id);
   const isDirectlyAssigned = this.isUserAssigned(user._id);
-  
   if (userRole === 'admin') return true;
   if (userRole === 'manager' && (isCreator || isDirectlyAssigned)) return true;
   if (userRole === 'employee' && isDirectlyAssigned) return true;
-  
   return false;
 };
 
@@ -272,12 +309,12 @@ taskSchema.methods.toClient = function () {
 };
 
 // Static method to find tasks assigned to a user
-taskSchema.statics.findAssignedToUser = function(userId) {
+taskSchema.statics.findAssignedToUser = function (userId) {
   return this.find({ 'assignedTo.user': userId });
 };
 
 // Static method to find tasks assigned to a group
-taskSchema.statics.findAssignedToGroup = function(groupId) {
+taskSchema.statics.findAssignedToGroup = function (groupId) {
   return this.find({ 'assignedTo.group': groupId });
 };
 

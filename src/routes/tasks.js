@@ -1,3 +1,4 @@
+
 // -----------------------------------------------------------
 // Get all notifications for the authenticated user
 // -----------------------------------------------------------
@@ -68,6 +69,37 @@ router.get('/notifications', authenticate, async (req, res) => {
     return res.status(500).json({ message: 'Get notifications error', error: e.message });
   }
 });
+
+/* -----------------------------------------------------------
+ * Reopen a task: set status to 'Todo' and mark isReopened
+ * --------------------------------------------------------- */
+router.post('/reopen/:taskId', authenticate, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    if (!mongoose.isValidObjectId(taskId)) {
+      return res.status(400).json({ message: 'Invalid task ID' });
+    }
+    const task = await Task.findById(taskId);
+    if (!task) {
+      return res.status(404).json({ message: 'Task not found' });
+    }
+    // Update status to Todo and mark isReopened
+    task.status.status = 'Todo';
+    task.isReopened = true;
+    // Optionally, add to statusHistory
+    task.statusHistory.push({
+      status: 'Todo',
+      updatedAt: new Date(),
+      updatedBy: req.user._id,
+      comment: 'Task reopened'
+    });
+    await task.save();
+    return res.json({ message: 'Task reopened and set to TODO', task: task.toClient() });
+  } catch (e) {
+    return res.status(500).json({ message: 'Reopen task error', error: e.message });
+  }
+});
+
 // -----------------------------------------------------------
 // Admin Dashboard Stats
 // Support both /admin-dashboard/reassignment-stats and /admin/dashboard/reassignment-stats
