@@ -417,7 +417,7 @@ router.get("/:id", authenticate, async (req, res) => {
 /* -----------------------------------------------------------
  * Update task (Admin, Manager, or Creator)
  * --------------------------------------------------------- */
-router.patch("/:id", authenticate, async (req, res) => {
+router.patch("/:id", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' }]), async (req, res) => {
   try {
     const { id } = req.params;
     let task =
@@ -449,17 +449,56 @@ router.patch("/:id", authenticate, async (req, res) => {
       payload.due = new Date(payload.due);
     }
 
+    let didChange = false;
+    // Handle file and voice uploads (local) for updates
+    if (req.files && req.files.file && req.files.file[0]) {
+      const fileName = req.files.file[0].filename;
+      task.file = `http://localhost:4000/uploads/${fileName}`;
+      didChange = true;
+    }
+    if (req.files && req.files.voice && req.files.voice[0]) {
+      const voiceName = req.files.voice[0].filename;
+      task.voice = `http://localhost:4000/uploads/${voiceName}`;
+      didChange = true;
+    }
     const updates = {};
     for (const key of allowedFields) {
       if (key in payload) updates[key] = payload[key];
     }
 
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ message: "No allowed fields to update" });
+    // If file/voice uploaded in this request, ignore attachments updates
+    if ((req.files && req.files.file) || (req.files && req.files.voice)) {
+      if ("attachments" in updates) delete updates.attachments;
     }
 
-    Object.assign(task, updates);
-    await task.save();
+    if (Object.keys(updates).length > 0) {
+      Object.assign(task, updates);
+      await task.save();
+      didChange = true;
+    }
+
+    // Allow assignment via assigneeId in this endpoint
+    if ("assigneeId" in payload) {
+      const assigneeId = payload.assigneeId;
+      if (!assigneeId) {
+        await task.removeAssignment();
+        didChange = true;
+      } else {
+        if (!mongoose.isValidObjectId(assigneeId)) {
+          return res.status(400).json({ message: `Invalid user ID: ${assigneeId}` });
+        }
+        const user = await User.findById(assigneeId);
+        if (!user || !user.isActive) {
+          return res.status(400).json({ message: `Invalid or inactive user: ${assigneeId}` });
+        }
+        await task.assignUser(assigneeId);
+        didChange = true;
+      }
+    }
+
+    if (!didChange) {
+      return res.status(400).json({ message: "No allowed fields to update" });
+    }
 
     await task.populate([
       { path: 'createdBy', select: 'name email' },
