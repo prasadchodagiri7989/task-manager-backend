@@ -303,37 +303,41 @@ router.post("/", authenticate, upload.fields([{ name: 'file' }, { name: 'voice' 
         message: `You have been assigned a new task: ${title}`,
         link: `/tasks/${task._id}`
       });
-      try {
-        const assignedUser = await User.findById(validatedUserId);
-        if (assignedUser && assignedUser.email) {
-          const transporter = nodemailer.createTransport({
-            service: "gmail",
-            auth: {
-              user: process.env.EMAIL_USER,
-              pass: process.env.EMAIL_PASS
-            }
-          });
+      
+      // ✅ Check for email environment variables before sending mail
+      if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+        try {
+          const assignedUser = await User.findById(validatedUserId);
+          if (assignedUser && assignedUser.email) {
+            const transporter = nodemailer.createTransport({
+              service: "gmail",
+              auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+              }
+            });
 
-          const taskLink = `http://localhost:8081/tasks/${task._id}`;
-          const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: assignedUser.email,
-            subject: "You have been assigned a new task",
-            html: `<p>Hello ${assignedUser.name},</p>
-              <p>You have been assigned to a new task:</p>
-              <ul>
-                <li><strong>Title:</strong> ${task.title}</li>
-                <li><strong>Description:</strong> ${task.description}</li>
-                <li><strong>Priority:</strong> ${task.priority}</li>
-                <li><strong>Due Date:</strong> ${task.due ? new Date(task.due).toLocaleString() : "N/A"}</li>
-              </ul>
-              <p>View task: <a href="${taskLink}">${taskLink}</a></p>`
-          };
+            const taskLink = `http://localhost:8081/tasks/${task._id}`;
+            const mailOptions = {
+              from: process.env.EMAIL_USER,
+              to: assignedUser.email,
+              subject: "You have been assigned a new task",
+              html: `<p>Hello ${assignedUser.name},</p>
+                <p>You have been assigned to a new task:</p>
+                <ul>
+                  <li><strong>Title:</strong> ${task.title}</li>
+                  <li><strong>Description:</strong> ${task.description}</li>
+                  <li><strong>Priority:</strong> ${task.priority}</li>
+                  <li><strong>Due Date:</strong> ${task.due ? new Date(task.due).toLocaleString() : "N/A"}</li>
+                </ul>
+                <p>View task: <a href="${taskLink}">${taskLink}</a></p>`
+            };
 
-          await transporter.sendMail(mailOptions);
+            await transporter.sendMail(mailOptions);
+          }
+        } catch (mailErr) {
+          console.error("Error sending assignment email:", mailErr);
         }
-      } catch (mailErr) {
-        console.error("Error sending assignment email:", mailErr);
       }
     }
 
