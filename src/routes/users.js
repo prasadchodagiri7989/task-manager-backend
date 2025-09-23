@@ -11,6 +11,7 @@ router.post('/', authenticate, permit(ROLES.ADMIN), async (req, res) => {
     const { name, email, password, role } = req.body;
     if (!name || !email || !password || !role) {
       return res.status(400).json({ message: 'Name, email, password, and role are required' });
+
     }
     if (!Object.values(ROLES).includes(role)) {
       return res.status(400).json({ message: 'Invalid role' });
@@ -26,6 +27,19 @@ router.post('/', authenticate, permit(ROLES.ADMIN), async (req, res) => {
     return res.status(500).json({ message: 'Create user error', error: e.message });
   }
 });
+
+    // DELETE /:id - delete user (admin only)
+    router.delete('/:id', authenticate, permit(ROLES.ADMIN), async (req, res) => {
+      try {
+        const user = await User.findByIdAndDelete(req.params.id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        return res.json({ message: 'User deleted', id: req.params.id });
+      } catch (e) {
+        return res.status(500).json({ message: 'Delete user error', error: e.message });
+      }
+    });
+
+
 // PATCH /:id - edit user details (admin only)
 router.patch('/:id', authenticate, permit(ROLES.ADMIN), async (req, res) => {
   try {
