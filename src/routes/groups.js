@@ -293,6 +293,77 @@ router.get("/employee/my-groups", authenticate, async (req, res) => {
   }
 });
 
+
+/**
+ * Group analytics: tasks assigned, completed in time, delayed, etc.
+ * Only accessible by group lead, creator, or admin.
+ */
+router.get("/:id/analytics", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+    const base = restrictQueryByRole(user);
+
+    // Find the group and check permissions
+    const group = await Group.findOne({ ...base, _id: id })
+      .populate(['lead', 'members', 'tasks']);
+    if (!group) return res.status(404).json({ message: "Group not found" });
+
+    // Only admin, group lead, or group creator can view analytics
+    const actorRole = normalizeRole(user.role);
+    const isLead = String(group.lead._id) === String(user._id);
+    const isCreator = String(group.createdBy._id) === String(user._id);
+    if (actorRole !== ROLES.ADMIN && !isLead && !isCreator) {
+      return res.status(403).json({ message: "Not authorized for group analytics" });
+    }
+
+    // Aggregate analytics for each member
+    const analytics = group.members.map(member => {
+      const memberId = String(member._id);
+      const memberTasks = group.tasks.filter(
+        t => t.assignedTo?.user && String(t.assignedTo.user) === memberId
+      );
+
+      let assigned = memberTasks.length;
+      let completed = memberTasks.filter(t => t.status === "Completed" || t.status === "Done").length;
+      let completedOnTime = memberTasks.filter(t => {
+        if (!t.completedAt || !t.due) return false;
+        return new Date(t.completedAt) <= new Date(t.due);
+      }).length;
+      let delayed = memberTasks.filter(t => {
+        if (!t.completedAt || !t.due) return false;
+        return new Date(t.completedAt) > new Date(t.due);
+      }).length;
+
+      return {
+        memberId,
+        memberName: member.name || member.email,
+        assigned,
+        completed,
+        completedOnTime,
+        delayed,
+      };
+    });
+
+    // Group totals
+    const totals = {
+      assigned: group.tasks.length,
+      completed: group.tasks.filter(t => t.status === "Completed" || t.status === "Done").length,
+      completedOnTime: group.tasks.filter(t => t.completedAt && t.due && new Date(t.completedAt) <= new Date(t.due)).length,
+      delayed: group.tasks.filter(t => t.completedAt && t.due && new Date(t.completedAt) > new Date(t.due)).length,
+    };
+
+    return res.json({
+      groupId: group._id,
+      groupTitle: group.title,
+      analytics,
+      totals,
+    });
+  } catch (e) {
+    return res.status(500).json({ message: "Group analytics error", error: e.message });
+  }
+});
+
 /* -----------------------------------------------------------
  * Add task to group (Admin, Group Lead, or Group Creator)
  * --------------------------------------------------------- */
