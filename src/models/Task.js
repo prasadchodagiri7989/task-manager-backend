@@ -116,6 +116,13 @@ const taskSchema = new mongoose.Schema(
     // New fields for points logic
     isReassigned: { type: Boolean, default: false },
     isReopened: { type: Boolean, default: false },
+    
+    // Field to track who claimed a group task
+    claimedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User"
+    },
+    
     assignedTo: {
       user: {
         type: mongoose.Schema.Types.ObjectId,
@@ -237,6 +244,14 @@ taskSchema.methods.isUserAssigned = function (userId) {
   return this.assignedTo.user && String(this.assignedTo.user) === String(userId);
 };
 
+// Method to check if user is member of assigned group
+taskSchema.methods.isUserInAssignedGroup = async function (userId) {
+  if (!this.assignedTo.group) return false;
+  const Group = mongoose.model('Group');
+  const group = await Group.findById(this.assignedTo.group);
+  return group && group.members.includes(userId);
+};
+
 // Method to check if user can access task
 
 // Points calculation logic
@@ -285,6 +300,22 @@ taskSchema.methods.canUserAccess = function (user, userRole) {
 
 // Client shape for Task (merged with TasksReport data)
 taskSchema.methods.toClient = function () {
+  // Helper function to safely extract populated data
+  const getPopulatedData = (field) => {
+    if (!field) return null;
+    if (typeof field === 'object' && field._id) {
+      return {
+        _id: String(field._id),
+        name: field.name,
+        email: field.email,
+        title: field.title,
+        description: field.description,
+        role: field.role
+      };
+    }
+    return String(field);
+  };
+
   return {
     id: this.tid,                         // numeric task id
     _id: String(this._id),               // MongoDB ObjectId
@@ -295,14 +326,17 @@ taskSchema.methods.toClient = function () {
     attachments: this.attachments,
     file: this.file,
     voice: this.voice,
-    createdBy: String(this.createdBy),
+    createdBy: getPopulatedData(this.createdBy),
     comments: this.comments,
     assignedTo: {
-      user: this.assignedTo.user ? String(this.assignedTo.user) : null,
-      group: this.assignedTo.group ? String(this.assignedTo.group) : null
+      user: getPopulatedData(this.assignedTo.user),
+      group: getPopulatedData(this.assignedTo.group)
     },
     status: this.status,
     statusHistory: this.statusHistory,
+    isReassigned: this.isReassigned,      // Add this field
+    isReopened: this.isReopened,          // Add this field
+    claimedBy: getPopulatedData(this.claimedBy), // Add this field
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
   };

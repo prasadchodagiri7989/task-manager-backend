@@ -41,20 +41,43 @@ const restrictQueryByRole = async (user) => {
       $or: [
         { createdBy: user._id },
         { "assignedTo.user": user._id },
-        { "assignedTo.group": { $in: groupIds } }
+        { 
+          "assignedTo.group": { $in: groupIds },
+          // For managers, show all group tasks regardless of claim status
+        }
       ],
     };
   }
   
   // Employee: tasks assigned directly or via group membership
   const groupIds = await Group.find({ members: user._id }).distinct("_id");
+  const userId = user._id;
   
-  return {
+  const query = {
     $or: [
-      { "assignedTo.user": user._id },
-      { "assignedTo.group": { $in: groupIds } },
-    ],
+      // Tasks assigned directly to the user
+      { "assignedTo.user": userId },
+      // Group tasks that are either:
+      // 1. Not claimed by anyone (available for claiming)
+      // 2. Already claimed by THIS user (they can continue working on it)
+      { 
+        $and: [
+          { "assignedTo.group": { $in: groupIds } },
+          {
+            $or: [
+              // Unclaimed tasks - available for any group member to claim
+              { "claimedBy": { $exists: false } },
+              { "claimedBy": null },
+              // Tasks claimed by this specific user - they continue to see it
+              { "claimedBy": userId }
+            ]
+          }
+        ]
+      }
+    ]
   };
+  
+  return query;
 };
 
 
@@ -67,6 +90,80 @@ router.get('/notifications', authenticate, async (req, res) => {
     return res.json({ data: notifications });
   } catch (e) {
     return res.status(500).json({ message: 'Get notifications error', error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Debug endpoint to check query filtering
+ * --------------------------------------------------------- */
+router.get('/debug/filter', authenticate, async (req, res) => {
+  try {
+    const filter = await restrictQueryByRole(req.user);
+    const userRole = normalizeRole(req.user.role);
+    
+    // Get group membership info
+    const groupIds = await Group.find({ members: req.user._id }).distinct("_id");
+    const groups = await Group.find({ members: req.user._id }).select('title members');
+    
+    // Get sample tasks to see what's happening
+    const allGroupTasks = await Task.find({ "assignedTo.group": { $in: groupIds } })
+      .select('title claimedBy assignedTo')
+      .populate('claimedBy', 'name email');
+    
+    return res.json({
+      userId: req.user._id,
+      userRole: userRole,
+      userGroups: groups,
+      filter: JSON.stringify(filter, null, 2),
+      allGroupTasks: allGroupTasks,
+      message: 'Debug info for task filtering'
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Debug error', error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Test endpoint to verify group task filtering
+ * --------------------------------------------------------- */
+router.get('/debug/group-tasks', authenticate, async (req, res) => {
+  try {
+    const userRole = normalizeRole(req.user.role);
+    
+    if (userRole !== ROLES.EMPLOYEE) {
+      return res.status(403).json({ message: 'This debug endpoint is for employees only' });
+    }
+    
+    // Get user's groups
+    const groupIds = await Group.find({ members: req.user._id }).distinct("_id");
+    
+    // Get all group tasks
+    const allGroupTasks = await Task.find({ "assignedTo.group": { $in: groupIds } })
+      .populate('claimedBy', 'name email')
+      .populate('assignedTo.group', 'title');
+    
+    // Manually filter to see what should be shown
+    const shouldSee = allGroupTasks.filter(task => {
+      return !task.claimedBy || task.claimedBy._id.toString() === req.user._id.toString();
+    });
+    
+    return res.json({
+      currentUserId: req.user._id.toString(),
+      currentUserName: req.user.name,
+      userGroups: groupIds,
+      allGroupTasks: allGroupTasks.map(t => ({
+        id: t.tid,
+        title: t.title,
+        claimedBy: t.claimedBy ? {
+          id: t.claimedBy._id.toString(),
+          name: t.claimedBy.name
+        } : null,
+        shouldCurrentUserSee: !t.claimedBy || t.claimedBy._id.toString() === req.user._id.toString()
+      })),
+      tasksShouldSee: shouldSee.map(t => ({ id: t.tid, title: t.title }))
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Debug error', error: e.message });
   }
 });
 
@@ -86,6 +183,7 @@ router.post('/reopen/:taskId', authenticate, async (req, res) => {
     // Update status to Todo and mark isReopened
     task.status.status = 'Todo';
     task.isReopened = true;
+    console.log(task);
     // Optionally, add to statusHistory
     task.statusHistory.push({
       status: 'Todo',
@@ -110,10 +208,8 @@ router.get('/admin/dashboard/reassignment-stats', authenticate, async (req, res)
       return res.status(403).json({ message: 'Only admin can view reassignment stats' });
     }
 
-    // Count tasks that have a non-empty statusHistory with a status of "Reassigned"
-    const reassignedTasks = await Task.countDocuments({
-      statusHistory: { $elemMatch: { status: "Reassigned" } }
-    });
+    // Count tasks using the isReassigned boolean field
+    const reassignedTasks = await Task.countDocuments({ isReassigned: true });
 
     // Optionally, return more detailed stats
     const totalTasks = await Task.countDocuments();
@@ -136,10 +232,8 @@ router.get('/admin-dashboard/reassignment-stats', authenticate, async (req, res)
       return res.status(403).json({ message: 'Only admin can view reassignment stats' });
     }
 
-    // Count tasks that have a non-empty statusHistory with a status of "Reassigned"
-    const reassignedTasks = await Task.countDocuments({
-      statusHistory: { $elemMatch: { status: "Reassigned" } }
-    });
+    // Count tasks using the isReassigned boolean field
+    const reassignedTasks = await Task.countDocuments({ isReassigned: true });
 
     // Optionally, return more detailed stats
     const totalTasks = await Task.countDocuments();
@@ -164,12 +258,16 @@ router.get('/admin-dashboard', authenticate, async (req, res) => {
       totalTasks,
       completedTasks,
       incompleteTasks,
+      reassignedTasks,
+      reopenedTasks,
       totalGroups,
       totalUsers
     ] = await Promise.all([
       Task.countDocuments(),
       Task.countDocuments({ 'status.status': 'Completed' }),
       Task.countDocuments({ 'status.status': { $ne: 'Completed' } }),
+      Task.countDocuments({ isReassigned: true }),
+      Task.countDocuments({ isReopened: true }),
       Group.countDocuments(),
       User.countDocuments()
     ]);
@@ -178,6 +276,8 @@ router.get('/admin-dashboard', authenticate, async (req, res) => {
       totalTasks,
       completedTasks,
       incompleteTasks,
+      reassignedTasks,
+      reopenedTasks,
       totalGroups,
       totalUsers
     });
@@ -186,6 +286,154 @@ router.get('/admin-dashboard', authenticate, async (req, res) => {
   }
 });
 
+/* -----------------------------------------------------------
+ * Admin: Get reopened tasks stats
+ * --------------------------------------------------------- */
+router.get('/admin-dashboard/reopened-stats', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view reopened stats' });
+    }
+
+    // Count tasks using the isReopened boolean field
+    const reopenedTasks = await Task.countDocuments({ isReopened: true });
+    const totalTasks = await Task.countDocuments();
+
+    // Additional analytics: reopened tasks by status
+    const reopenedByStatus = await Task.aggregate([
+      { $match: { isReopened: true } },
+      { $group: { _id: '$status.status', count: { $sum: 1 } } }
+    ]);
+
+    return res.json({
+      totalTasks,
+      reopenedTasks,
+      reopenedByStatus
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Reopened stats error', error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Admin: Get detailed analytics for both reopened and reassigned tasks
+ * --------------------------------------------------------- */
+router.get('/admin-dashboard/detailed-analytics', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view detailed analytics' });
+    }
+
+    const [
+      totalTasks,
+      reassignedTasks,
+      reopenedTasks,
+      bothReassignedAndReopened,
+      reassignedByPriority,
+      reopenedByPriority
+    ] = await Promise.all([
+      Task.countDocuments(),
+      Task.countDocuments({ isReassigned: true }),
+      Task.countDocuments({ isReopened: true }),
+      Task.countDocuments({ isReassigned: true, isReopened: true }),
+      Task.aggregate([
+        { $match: { isReassigned: true } },
+        { $group: { _id: '$priority', count: { $sum: 1 } } }
+      ]),
+      Task.aggregate([
+        { $match: { isReopened: true } },
+        { $group: { _id: '$priority', count: { $sum: 1 } } }
+      ])
+    ]);
+
+    return res.json({
+      totalTasks,
+      reassignedTasks,
+      reopenedTasks,
+      bothReassignedAndReopened,
+      reassignedByPriority,
+      reopenedByPriority,
+      percentages: {
+        reassignedPercentage: totalTasks > 0 ? ((reassignedTasks / totalTasks) * 100).toFixed(2) : 0,
+        reopenedPercentage: totalTasks > 0 ? ((reopenedTasks / totalTasks) * 100).toFixed(2) : 0
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Detailed analytics error', error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Admin: Get list of reassigned tasks
+ * --------------------------------------------------------- */
+router.get('/admin-dashboard/reassigned-tasks', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view reassigned tasks' });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const reassignedTasks = await Task.find({ isReassigned: true })
+      .populate('createdBy', 'name email')
+      .populate('assignedTo.user', 'name email')
+      .populate('assignedTo.group', 'title')
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalReassignedTasks = await Task.countDocuments({ isReassigned: true });
+
+    return res.json({
+      tasks: reassignedTasks.map(task => shape(task)),
+      totalTasks: totalReassignedTasks,
+      currentPage: page,
+      totalPages: Math.ceil(totalReassignedTasks / limit)
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Get reassigned tasks error', error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Admin: Get list of reopened tasks
+ * --------------------------------------------------------- */
+router.get('/admin-dashboard/reopened-tasks', authenticate, async (req, res) => {
+  try {
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: 'Only admin can view reopened tasks' });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const reopenedTasks = await Task.find({ isReopened: true })
+      .populate('createdBy', 'name email')
+      .populate('assignedTo.user', 'name email')
+      .populate('assignedTo.group', 'title')
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalReopenedTasks = await Task.countDocuments({ isReopened: true });
+
+    return res.json({
+      tasks: reopenedTasks.map(task => shape(task)),
+      totalTasks: totalReopenedTasks,
+      currentPage: page,
+      totalPages: Math.ceil(totalReopenedTasks / limit)
+    });
+  } catch (e) {
+    return res.status(500).json({ message: 'Get reopened tasks error', error: e.message });
+  }
+});
 
 /* -----------------------------------------------------------
  * Create task (Admin, Manager) with file/voice upload
@@ -393,6 +641,7 @@ router.get("/", authenticate, async (req, res) => {
       .populate('createdBy', 'name email')
       .populate('assignedTo.user', 'name email role')
       .populate('assignedTo.group', 'title description')
+      .populate('claimedBy', 'name email')
       .populate('status.updatedBy', 'name email')
       .populate('comments.user', 'name email')
       .sort({ updatedAt: -1 })
@@ -640,11 +889,45 @@ router.patch("/:id/status", authenticate, async (req, res) => {
     const actorRole = normalizeRole(req.user.role);
     const isCreator = String(task.createdBy) === String(req.user._id);
     const isAssigned = task.isUserAssigned(req.user._id);
+    
+    // Check if user is a member of the assigned group
+    let isGroupMember = false;
+    if (task.assignedTo.group) {
+      const group = await Group.findById(task.assignedTo.group);
+      if (group && group.members.includes(req.user._id)) {
+        isGroupMember = true;
+      }
+    }
 
-    if (actorRole !== ROLES.ADMIN && actorRole !== ROLES.MANAGER && !isCreator && !isAssigned) {
+    if (actorRole !== ROLES.ADMIN && actorRole !== ROLES.MANAGER && !isCreator && !isAssigned && !isGroupMember) {
       return res.status(403).json({
         message: "You can only update status for tasks assigned to you or that you created"
       });
+    }
+
+    // Special logic for group tasks when status changes to InProgress
+    if (task.assignedTo.group && status === 'InProgress' && !task.claimedBy) {
+      // Claim the task for this user
+      task.claimedBy = req.user._id;
+      
+      // Notify other group members that the task has been claimed
+      const group = await Group.findById(task.assignedTo.group).populate('members', 'name email');
+      if (group) {
+        const otherMembers = group.members.filter(member => 
+          member._id.toString() !== req.user._id.toString()
+        );
+        
+        for (const member of otherMembers) {
+          await Notification.create({
+            user: member._id,
+            title: `Task Claimed: ${task.title}`,
+            message: `${req.user.name || 'A team member'} has started working on task: ${task.title}`,
+            type: 'task_claimed',
+            taskId: task._id,
+            createdBy: req.user._id
+          });
+        }
+      }
     }
 
     await task.updateStatus(status, req.user._id, comment);
@@ -675,6 +958,86 @@ router.patch("/:id/status", authenticate, async (req, res) => {
     return res
       .status(500)
       .json({ message: "Update task status error", error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Claim a group task (Employee can claim an unassigned group task)
+ * --------------------------------------------------------- */
+router.patch("/:id/claim", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    let task =
+      /^\d+$/.test(id)
+        ? await Task.findOne({ tid: +id })
+        : mongoose.isValidObjectId(id)
+          ? await Task.findById(id)
+          : null;
+
+    if (!task) return res.status(404).json({ message: "Task not found" });
+
+    // Check if task is assigned to a group
+    if (!task.assignedTo.group) {
+      return res.status(400).json({ message: "This task is not assigned to a group" });
+    }
+
+    // Check if task is already claimed
+    if (task.claimedBy) {
+      return res.status(400).json({ message: "This task has already been claimed by another user" });
+    }
+
+    // Check if user is a member of the assigned group
+    const group = await Group.findById(task.assignedTo.group);
+    if (!group || !group.members.includes(req.user._id)) {
+      return res.status(403).json({ message: "You are not a member of the group assigned to this task" });
+    }
+
+    // Claim the task
+    task.claimedBy = req.user._id;
+    
+    // Add to status history
+    task.statusHistory.push({
+      status: task.status.status,
+      updatedAt: new Date(),
+      updatedBy: req.user._id,
+      comment: 'Task claimed by user'
+    });
+
+    await task.save();
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
+      { path: 'claimedBy', select: 'name email' },
+      { path: 'status.updatedBy', select: 'name email' }
+    ]);
+
+    // Notify other group members that the task has been claimed
+    const otherMembers = group.members.filter(memberId => 
+      memberId.toString() !== req.user._id.toString()
+    );
+    
+    for (const memberId of otherMembers) {
+      await Notification.create({
+        user: memberId,
+        title: `Task Claimed: ${task.title}`,
+        message: `${req.user.name || 'A team member'} has claimed task: ${task.title}`,
+        type: 'task_claimed',
+        taskId: task._id,
+        createdBy: req.user._id
+      });
+    }
+
+    return res.json({ 
+      message: "Task claimed successfully", 
+      task: shape(task) 
+    });
+  } catch (e) {
+    return res.status(500).json({ 
+      message: "Claim task error", 
+      error: e.message 
+    });
   }
 });
 
@@ -751,6 +1114,146 @@ router.patch("/:id/assign", authenticate, async (req, res) => {
     return res
       .status(500)
       .json({ message: "Assign task error", error: e.message });
+  }
+});
+
+/* -----------------------------------------------------------
+ * Reassign task to user or group (Admin only)
+ * --------------------------------------------------------- */
+router.patch("/:id/reassign", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, groupId } = req.body;
+
+    // Only admins can reassign tasks
+    const actorRole = normalizeRole(req.user.role);
+    if (actorRole !== ROLES.ADMIN) {
+      return res.status(403).json({ message: "Only admins can reassign tasks" });
+    }
+
+    // Validate that only one assignment type is provided
+    if (userId && groupId) {
+      return res.status(400).json({ 
+        message: "Cannot assign to both user and group simultaneously" 
+      });
+    }
+
+    if (!userId && !groupId) {
+      return res.status(400).json({ 
+        message: "Must provide either userId or groupId for reassignment" 
+      });
+    }
+
+    let task =
+      /^\d+$/.test(id)
+        ? await Task.findOne({ tid: +id })
+        : mongoose.isValidObjectId(id)
+          ? await Task.findById(id)
+          : null;
+
+    if (!task) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+
+    // Validate assigned user if provided
+    let validatedUserId = null;
+    if (userId) {
+      if (!mongoose.isValidObjectId(userId)) {
+        return res.status(400).json({ message: "Invalid user ID format" });
+      }
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      validatedUserId = userId;
+    }
+
+    // Validate assigned group if provided
+    let validatedGroupId = null;
+    if (groupId) {
+      if (!mongoose.isValidObjectId(groupId)) {
+        return res.status(400).json({ message: "Invalid group ID format" });
+      }
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(404).json({ message: "Group not found" });
+      }
+      validatedGroupId = groupId;
+    }
+
+    // Store previous assignment for notification
+    const previousAssignment = {
+      user: task.assignedTo.user,
+      group: task.assignedTo.group
+    };
+
+    // Check if this is actually a reassignment (task was previously assigned)
+    const isActualReassignment = previousAssignment.user || previousAssignment.group;
+
+    // Update assignment and set isReassigned to true only if it's an actual reassignment
+    task.assignedTo = {
+      user: validatedUserId,
+      group: validatedGroupId
+    };
+    
+    // Only mark as reassigned if the task was previously assigned to someone
+    if (isActualReassignment) {
+      task.isReassigned = true;
+    }
+
+    // Add to status history to track reassignment
+    task.statusHistory.push({
+      status: task.status.status, // Keep current status
+      updatedAt: new Date(),
+      updatedBy: req.user._id,
+      comment: isActualReassignment ? 
+        `Task reassigned ${validatedUserId ? 'to user' : 'to group'}` :
+        `Task assigned ${validatedUserId ? 'to user' : 'to group'}`
+    });
+
+    await task.save();
+    await task.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'assignedTo.user', select: 'name email role' },
+      { path: 'assignedTo.group', select: 'title description' },
+      { path: 'status.updatedBy', select: 'name email' }
+    ]);
+
+    // Notify newly assigned user
+    if (validatedUserId) {
+      const notification = await Notification.create({
+        user: validatedUserId,
+        title: isActualReassignment ? `Task Reassigned: ${task.title}` : `Task Assigned: ${task.title}`,
+        message: isActualReassignment ? 
+          `You have been reassigned to task: ${task.title}` :
+          `You have been assigned to task: ${task.title}`,
+        type: isActualReassignment ? 'task_reassigned' : 'task_assigned',
+        taskId: task._id,
+        createdBy: req.user._id
+      });
+    }
+
+    // Notify previous assignee if there was one and it's actually a reassignment
+    if (isActualReassignment && previousAssignment.user && previousAssignment.user.toString() !== validatedUserId) {
+      const notification = await Notification.create({
+        user: previousAssignment.user,
+        title: `Task Reassignment: ${task.title}`,
+        message: `Task "${task.title}" has been reassigned to someone else`,
+        type: 'task_unassigned',
+        taskId: task._id,
+        createdBy: req.user._id
+      });
+    }
+
+    return res.json({ 
+      message: isActualReassignment ? "Task reassigned successfully" : "Task assigned successfully", 
+      task: shape(task) 
+    });
+  } catch (e) {
+    return res.status(500).json({ 
+      message: "Reassign task error", 
+      error: e.message 
+    });
   }
 });
 
