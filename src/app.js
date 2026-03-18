@@ -25,6 +25,7 @@ const whitelist = [
   'http://localhost:8082',
   'https://task-mng-flow.vercel.app',,
   'https://task-manager-united.vercel.app',
+  'https://taskly.neuvexa.in',
   process.env.FRONTEND_ORIGIN,
 ].filter(Boolean);
 
